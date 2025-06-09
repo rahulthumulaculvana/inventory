@@ -605,7 +605,7 @@
         </div>
         <div class="form-group">
             <label for="userId">User ID</label>
-            <input type="text" id="userId" class="form-control" value="demo-user-123" placeholder="Enter user ID">
+            <input type="text" id="userId" class="form-control" value="rahulthumula-gmailcom" placeholder="Enter user ID">
         </div>
         <div class="form-group">
             <label for="apiUrl">API URL</label>
@@ -655,7 +655,7 @@
         // State
         let chats = [];
         let currentChatIndex = -1;
-        let userId = 'demo-user-123';
+        let userId = 'rahulthumula-gmailcom';
         let apiUrl = 'http://localhost:8000';
         let initialized = false;
         let loading = false;
@@ -759,7 +759,7 @@
             
             // Scroll to bottom
             chatMessages.scrollTop = chatMessages.scrollHeight;
-        }
+            }
 
         // Add a message to the current chat
         function addMessage(role, content, processingTime = null, inputMethod = lastInputMethod) {
@@ -865,7 +865,7 @@
             });
         }
 
-        // Send a message
+        // Send a message - FIXED TO MATCH BACKEND EXPECTATIONS
         async function sendMessage() {
             const message = messageInput.value.trim();
             if (!message || loading) return;
@@ -889,12 +889,13 @@
                 // Get start time for processing time calculation
                 const startTime = new Date();
                 
-                // Create question object
-                const question = {
-                    text: message,
-                    user_id: userId,
-                    conversation_id: chats[currentChatIndex].id
+                // FIXED: Create request object with correct field names
+                const requestData = {
+                    user_id: userId,        // ✅ Backend expects "user_id"
+                    question: message       // ✅ Backend expects "question" (was "text")
                 };
+                
+                console.log('Sending request:', requestData); // Debug log
                 
                 // Send to API
                 const response = await fetch(`${apiUrl}/query`, {
@@ -902,19 +903,24 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(question)
+                    body: JSON.stringify(requestData)
                 });
                 
                 // Calculate processing time
                 const processingTime = (new Date() - startTime) / 1000;
                 
+                console.log('Response status:', response.status); // Debug log
+                
                 // Check response
                 if (!response.ok) {
-                    throw new Error('Failed to get response');
+                    const errorText = await response.text();
+                    console.error('API Error:', errorText);
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
                 }
                 
                 // Parse response
                 const data = await response.json();
+                console.log('Response data:', data); // Debug log
                 
                 // Add assistant message
                 const assistantMessage = addMessage('assistant', data.response, processingTime);
@@ -924,13 +930,33 @@
                     speakText(data.response);
                 }
                 
+                // Update status
+                statusDot.className = 'status-dot connected';
+                statusText.textContent = 'Connected';
+                
             } catch (error) {
                 console.error('Error:', error);
-                addMessage('assistant', 'Sorry, I encountered an error processing your request. Please try again.');
+                
+                // Add error message to chat
+                let errorMessage = 'Sorry, I encountered an error processing your request.';
+                if (error.message.includes('422')) {
+                    errorMessage += ' There seems to be a format issue with the request.';
+                } else if (error.message.includes('404')) {
+                    errorMessage += ' The API endpoint was not found.';
+                } else if (error.message.includes('500')) {
+                    errorMessage += ' There was a server error.';
+                }
+                errorMessage += ' Please try again.';
+                
+                addMessage('assistant', errorMessage);
+                
+                // Update status
+                statusDot.className = 'status-dot disconnected';
+                statusText.textContent = 'Error';
+                
             } finally {
                 // Reset loading state
                 loading = false;
-                statusText.textContent = 'Connected';
             }
         }
 
@@ -1037,7 +1063,7 @@
         function loadSettings() {
             const settings = JSON.parse(localStorage.getItem('restaurant-inventory-settings')) || {};
             
-            userId = settings.userId || 'test';
+            userId = settings.userId || 'rahulthumula-gmailcom';
             apiUrl = settings.apiUrl || 'http://localhost:8000';
             voiceMode = settings.voiceMode || 'adaptive';
             
@@ -1104,29 +1130,50 @@
                 updateChatList();
                 renderCurrentChat();
                 
-                // Initialize backend
+                // Test API connection first
                 statusDot.className = 'status-dot connecting';
                 statusText.textContent = 'Connecting...';
                 
-                const response = await fetch(`${apiUrl}/initialize/${userId}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ user_id: userId, force_rebuild: false })
-                });
-                
-                if (response.ok) {
-                    statusDot.className = 'status-dot connected';
-                    statusText.textContent = 'Connected';
+                try {
+                    // Test basic connection
+                    const healthResponse = await fetch(`${apiUrl}/health`);
+                    if (!healthResponse.ok) {
+                        throw new Error('Health check failed');
+                    }
+                    
+                    // Initialize backend (if endpoint exists)
+                    try {
+                        const initResponse = await fetch(`${apiUrl}/initialize/${userId}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ user_id: userId, force_rebuild: false })
+                        });
+                        
+                        // Don't fail if initialize endpoint doesn't exist (404)
+                        if (initResponse.ok || initResponse.status === 404) {
+                            statusDot.className = 'status-dot connected';
+                            statusText.textContent = 'Connected';
+                            initialized = true;
+                        } else {
+                            throw new Error('Initialize failed');
+                        }
+                    } catch (initError) {
+                        // If initialize fails, still mark as connected if health check passed
+                        console.warn('Initialize endpoint not available, but API is reachable');
+                        statusDot.className = 'status-dot connected';
+                        statusText.textContent = 'Connected';
+                        initialized = true;
+                    }
                     
                     // If no chats, create new one
                     if (chats.length === 0) {
                         createNewChat();
                     }
                     
-                    initialized = true;
-                } else {
+                } catch (error) {
+                    console.error('Connection error:', error);
                     statusDot.className = 'status-dot disconnected';
                     statusText.textContent = 'Connection Failed';
                 }
@@ -1211,13 +1258,7 @@
                         statusDot.className = 'status-dot connecting';
                         statusText.textContent = 'Connecting...';
                         
-                        const response = await fetch(`${newApiUrl}/initialize/${userId}`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({ user_id: userId, force_rebuild: false })
-                        });
+                        const response = await fetch(`${newApiUrl}/health`);
                         
                         if (response.ok) {
                             statusDot.className = 'status-dot connected';
@@ -1261,9 +1302,7 @@
                     statusDot.className = 'status-dot connecting';
                     statusText.textContent = 'Refreshing...';
                     
-                    const response = await fetch(`${apiUrl}/refresh/${userId}`, {
-                        method: 'POST'
-                    });
+                    const response = await fetch(`${apiUrl}/health`);
                     
                     if (response.ok) {
                         statusDot.className = 'status-dot connected';
@@ -1271,7 +1310,7 @@
                         
                         // Add system message
                         if (currentChatIndex !== -1) {
-                            addMessage('system', 'Inventory data refreshed.');
+                            addMessage('system', 'Connection refreshed.');
                         }
                     } else {
                         statusDot.className = 'status-dot disconnected';
