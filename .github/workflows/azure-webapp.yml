@@ -35,4 +35,4 @@ jobs:
       uses: azure/webapps-deploy@v2
       with:
         app-name: inventory-api        # your App Service name
-        package: .                     # deploy current directory
+        package: .                     
