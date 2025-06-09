@@ -25,4 +25,4 @@ numpy             # vector maths if you need it later
 # ===== Voice extras (only if you wire server-side speech) =====
 # speechrecognition
 # pyaudio
-faiss
+faiss-cpu 
