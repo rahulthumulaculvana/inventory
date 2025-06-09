@@ -1,7 +1,5 @@
 # rag.py
 from database import CosmosDB
-from embeddings import EmbeddingGenerator
-from search import VectorStore
 from openai import OpenAI
 from config import OPENAI_API_KEY, OPENAI_MODEL, SEARCH_MODEL
 import uuid
@@ -21,25 +19,9 @@ class RAGAssistant:
         logger.info(f"Initializing RAGAssistant for user {user_id}")
         self.user_id = user_id
         self.cosmos_db = CosmosDB()
-        self.embedding_generator = EmbeddingGenerator()
-        self.vector_store = VectorStore(user_id)
+        self.inventory_cache = []
         self.openai_client = OpenAI(api_key=OPENAI_API_KEY)
         
-    @retry(
-        stop=stop_after_attempt(3), 
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((ValueError, ConnectionError))
-    )
-    async def _generate_embedding_with_retry(self, text):
-        """Generate embedding with improved retry logic."""
-        try:
-            logger.info(f"Generating embedding for text (length: {len(text)})")
-            embedding = await self.embedding_generator.generate_embedding(text)
-            logger.info(f"Generated embedding dimensions: {len(embedding)}")
-            return embedding
-        except Exception as e:
-            logger.error(f"Error generating embedding: {str(e)}")
-            raise
 
     def _create_item_content(self, item):
         """Create rich, searchable content for an inventory item with improved structure."""
@@ -90,66 +72,6 @@ class RAGAssistant:
             # Return a minimal content to avoid complete failure
             return f"Item: {item.get('Inventory Item Name', 'Unknown Item')}"
 
-    async def index_inventory_items(self, inventory_list):
-        """Process and index inventory items with improved error handling."""
-        vector_documents = []
-        logger.info(f"Processing {len(inventory_list)} inventory documents")
-        
-        if not inventory_list:
-            logger.error("No inventory documents found")
-            raise ValueError("No inventory documents found")
-            
-        inventory_doc = inventory_list[0]
-        items = inventory_doc.get('items', [])
-        
-        if not items:
-            logger.warning("Inventory document contains no items")
-            return
-        
-        logger.info(f"Processing {len(items)} individual inventory items")
-        
-        for i, item in enumerate(items):
-            try:
-                # Create rich content
-                content = self._create_item_content(item)
-                
-                # Generate embedding
-                embedding = await self._generate_embedding_with_retry(content)
-                
-                # Create document with correct field mapping
-                vector_doc = {
-                    'id': str(uuid.uuid4()),
-                    'userId': self.user_id,
-                    'supplier_name': item.get('Supplier Name', ''),
-                    'inventory_item_name': item.get('Inventory Item Name', ''),
-                    'item_name': item.get('Item Name', ''),
-                    'item_number': item.get('Item Number', ''),
-                    'quantity_in_case': float(item.get('Quantity In a Case', 0)),
-                    'total_units': float(item.get('Total Units', 0)),
-                    'case_price': float(item.get('Case Price', 0)),
-                    'cost_of_unit': float(item.get('Cost of a Unit', 0)),
-                    'category': item.get('Category', ''),
-                    'measured_in': item.get('Measured In', ''),
-                    'catch_weight': item.get('Catch Weight', ''),
-                    'priced_by': item.get('Priced By', ''),
-                    'splitable': item.get('Splitable', ''),
-                    'content': content,
-                    'content_vector': embedding
-                }
-                
-                vector_documents.append(vector_doc)
-                logger.info(f"Successfully processed item {i+1}/{len(items)}: {item.get('Inventory Item Name')}")
-                
-            except Exception as e:
-                logger.error(f"Error processing item {i}: {str(e)}")
-                # Continue with next item instead of failing completely
-                continue
-        
-        if vector_documents:
-            logger.info(f"Adding {len(vector_documents)} documents to vector store")
-            await self.vector_store.add_documents(vector_documents)
-        else:
-            logger.warning("No documents were successfully processed for indexing")
 
     async def initialize(self):
         """Initialize the RAG system with better error handling and logging."""
@@ -164,13 +86,9 @@ class RAGAssistant:
             
             logger.info(f"Retrieved {len(inventory)} inventory documents")
             
-            # Create or update search index
-            logger.info("Creating/updating search index")
-            await self.vector_store.create_index()
-            
-            # Index inventory items
-            logger.info("Indexing inventory items")
-            await self.index_inventory_items(inventory)
+            # Cache inventory data for later use
+            self.inventory_cache = inventory[0].get('items', [])
+            logger.info("Inventory cached for user")
             
             logger.info("Initialization completed successfully")
             
@@ -200,19 +118,13 @@ class RAGAssistant:
         selected_model = SEARCH_MODEL if needs_web_search else OPENAI_MODEL
         logger.info(f"Selected model: {selected_model}")
         
-        # Generate embedding for the question
-        question_embedding = await self._generate_embedding_with_retry(user_question)
-        
-        # Search for relevant inventory items
-        logger.info(f"Searching for top {top_k} relevant items")
-        search_results = await self.vector_store.search(question_embedding, top_k)
-        
-        if not search_results:
-            logger.warning("No relevant inventory items found")
-            return "I couldn't find any relevant inventory information to answer your question. Please try rephrasing or ask about specific inventory items."
-        
-        # Format the search results for the prompt
-        formatted_results = self._format_search_results(search_results)
+        # Prepare inventory data for the prompt
+        if not self.inventory_cache:
+            docs = await self.cosmos_db.get_user_documents(self.user_id)
+            if docs:
+                self.inventory_cache = docs[0].get('items', [])
+
+        formatted_results = self._format_search_results(self.inventory_cache[:top_k])
         
         # Construct a better prompt with clear sections
         prompt = self._construct_prompt(user_question, formatted_results, needs_web_search)
@@ -387,12 +299,12 @@ Do not use Markdown formatting like ** or -. Use only HTML as specified above.
         formatted_items = []
         
         for i, item in enumerate(search_results):
-            # Extract key information
-            inventory_item_name = item.get('inventory_item_name', 'Unknown')
-            category = item.get('category', 'Unknown')
-            cost = item.get('cost_of_unit', 0)
-            total_units = item.get('total_units', 0)
-            case_price = item.get('case_price', 0)
+            # Extract key information, handling different field names
+            inventory_item_name = item.get('inventory_item_name') or item.get('Inventory Item Name', 'Unknown')
+            category = item.get('category') or item.get('Category', 'Unknown')
+            cost = item.get('cost_of_unit') or item.get('Cost of a Unit', 0)
+            total_units = item.get('total_units') or item.get('Total Units', 0)
+            case_price = item.get('case_price') or item.get('Case Price', 0)
             
             # Format as structured data
             formatted_item = (
@@ -420,13 +332,9 @@ Do not use Markdown formatting like ** or -. Use only HTML as specified above.
                 logger.error(f"No inventory found for user {self.user_id}")
                 raise ValueError(f"No inventory found for user {self.user_id}")
             
-            # Delete and recreate index
-            logger.info("Recreating search index")
-            await self.vector_store.create_index()
-            
-            # Index inventory items
-            logger.info("Indexing updated inventory items")
-            await self.index_inventory_items(inventory)
+            # Refresh cached inventory data
+            self.inventory_cache = inventory[0].get('items', [])
+            logger.info("Inventory cache refreshed")
             
             logger.info("Re-indexing completed successfully")
             return True
