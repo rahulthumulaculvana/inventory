@@ -1,0 +1,27 @@
+# ===== Core framework =====
+fastapi
+uvicorn[standard]
+
+# ===== Config / env handling =====
+python-dotenv
+pydantic          # FastAPI ≥0.110 uses Pydantic v2
+
+# ===== HTTP client (FastAPI async) =====
+httpx
+
+# ===== OpenAI & token utilities =====
+openai
+tiktoken          # optional but recommended for token-safe chunking
+
+# ===== Azure SDKs =====
+azure-core
+azure-identity    # if you switch from key auth to managed identity
+azure-cosmos
+azure-search-documents
+
+# ===== Data helpers (optional but common) =====
+numpy             # vector maths if you need it later
+
+# ===== Voice extras (only if you wire server-side speech) =====
+# speechrecognition
+# pyaudio

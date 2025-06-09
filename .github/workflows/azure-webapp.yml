@@ -1,0 +1,38 @@
+# .github/workflows/azure-webapp.yml
+name: Deploy inventory API to Azure
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # (OIDC login – replace with publish-profile login if you prefer)
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - run: pip install -r requirements.txt
+
+    - name: Deploy to Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: inventory-api        # your App Service name
+        package: .                     # deploy current directory
