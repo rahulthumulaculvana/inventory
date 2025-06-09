@@ -27,13 +27,13 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.10'
  
     - run: pip install -r requirements.txt
 
     - name: Deploy to Web App
       uses: azure/webapps-deploy@v2
       with:
-        app-name: inventory-api        # your App Service name
+        app-name: inventoryAssistant     # your App Service name
         package: .                     
 
