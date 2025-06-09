@@ -183,25 +183,6 @@ async def initialize_user_rag(user_id: str, request: InitializeRequest = None):
         logger.error(f"Error initializing RAG system: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Background task for lazy initialization
-async def lazy_initialize(user_id: str):
-    try:
-        if user_id not in rag_assistants:
-            logger.info(f"Lazy initializing RAG system for user {user_id}")
-            rag_assistant = RAGAssistant(user_id)
-            if await index_exists(user_id):
-                await rag_assistant.vector_store.connect_to_index()
-            else:
-                await rag_assistant.initialize()
-            rag_assistants[user_id] = rag_assistant
-            
-            # Initialize inventory agent
-            inventory_agent = InventoryAgent(user_id)
-            inventory_agents[user_id] = inventory_agent
-            
-            logger.info(f"Lazy initialization complete for user {user_id}")
-    except Exception as e:
-        logger.error(f"Error in lazy initialization: {str(e)}")
 
 async def detect_action_request(text):
     """
@@ -298,153 +279,40 @@ async def query_rag(question: Question, background_tasks: BackgroundTasks):
     start_time = time.time()
     user_id = question.user_id
     conversation_id = question.conversation_id or str(uuid.uuid4())
-    
+
     try:
-        # Check if RAG assistant exists or needs initialization
         if user_id not in rag_assistants:
-            # Add initialization as background task and use simpler response for now
-            background_tasks.add_task(lazy_initialize, user_id)
-            
-            # Check if index exists
-            if await index_exists(user_id):
-                logger.info(f"Index exists for user {user_id}, connecting...")
-                rag_assistant = RAGAssistant(user_id)
-                await rag_assistant.vector_store.connect_to_index()
-                rag_assistants[user_id] = rag_assistant
-                
-                # Initialize inventory agent
-                inventory_agent = InventoryAgent(user_id)
-                inventory_agents[user_id] = inventory_agent
-            else:
-                logger.info(f"No index found for user {user_id}")
-                # Return a helpful message while initialization happens in background
-                return Response(
-                    response="I'm preparing your inventory data for the first time. Please ask your question again in a few moments.",
-                    conversation_id=conversation_id,
-                    processing_time=time.time() - start_time
-                )
-        
-        # First check if the RAG assistant detects action intent
-        rag_assistant = rag_assistants[user_id]
-        has_action_intent, action_type, action_params = await rag_assistant.check_for_action_intent(question.text)
-        
-        # If action intent detected by RAG
-        if has_action_intent:
-            logger.info(f"Action intent detected by RAG: {action_type} with params: {action_params}")
-            
-            # Use the inventory agent to perform the action
-            if user_id not in inventory_agents:
-                inventory_agents[user_id] = InventoryAgent(user_id)
-                
-            agent = inventory_agents[user_id]
-            
-            # Map parameters correctly based on action type
-            if action_type == "update_price":
-                # Convert params to expected format
-                mapped_params = {
-                    "item_identifier": action_params.get("item_number") or action_params.get("item_identifier"),
-                    "new_price": float(action_params.get("new_price")),
-                    "price_type": action_params.get("price_type", "Cost of a Unit")
-                }
-                
-                # Make sure price_type is valid
-                if mapped_params["price_type"] not in ["Cost of a Unit", "Case Price"]:
-                    mapped_params["price_type"] = "Cost of a Unit"
-                
-                logger.info(f"Performing price update with params: {mapped_params}")
-                result = await agent.update_item_price(
-                    mapped_params["item_identifier"],
-                    mapped_params["new_price"],
-                    mapped_params["price_type"]
-                )
-            
-            elif action_type == "update_quantity":
-                # Convert params to expected format
-                mapped_params = {
-                    "item_identifier": action_params.get("item_number") or action_params.get("item_identifier"),
-                    "new_quantity": float(action_params.get("new_quantity"))
-                }
-                
-                logger.info(f"Performing quantity update with params: {mapped_params}")
-                result = await agent.update_item_quantity(
-                    mapped_params["item_identifier"],
-                    mapped_params["new_quantity"]
-                )
-            
-            elif action_type == "get_item_details":
-                # Convert params to expected format
-                item_identifier = action_params.get("item_number") or action_params.get("item_identifier")
-                
-                logger.info(f"Getting item details for: {item_identifier}")
-                result = await agent.get_item_details(item_identifier)
-                if result["success"] and "item" in result:
-                    result["data"] = result["item"]
-            
-            else:
-                # Fall back to basic action detection for other types
-                is_action_request, detected_action_type, detected_action_params = await detect_action_request(question.text)
-                
-                if is_action_request:
-                    logger.info(f"Performing action detected via regex: {detected_action_type}")
-                    result = await perform_agent_action(agent, detected_action_type, detected_action_params)
-                else:
-                    # If we get here, we received an action but couldn't process it
-                    result = {
-                        "success": False,
-                        "message": f"Unable to process action: {action_type}. Missing required parameters."
-                    }
-            
-            # Generate a natural language response based on the action result
+            rag_assistant = RAGAssistant(user_id)
+            await rag_assistant.initialize()
+            rag_assistants[user_id] = rag_assistant
+
+        if user_id not in inventory_agents:
+            inventory_agents[user_id] = InventoryAgent(user_id)
+
+        agent = inventory_agents[user_id]
+
+        is_action_request, action_type, action_params = await detect_action_request(question.text)
+
+        if is_action_request:
+            result = await perform_agent_action(agent, action_type, action_params)
             if result["success"]:
-                response = f"✅ {result['message']}"
+                response_text = f"✅ {result['message']}"
                 if 'data' in result and result['data']:
-                    response += "\n\nHere are the details:\n"
-                    response += json.dumps(result['data'], indent=2)
+                    response_text += "\n\nHere are the details:\n" + json.dumps(result['data'], indent=2)
             else:
-                response = f"❌ {result['message']}"
-            
-            processing_time = time.time() - start_time
-            logger.info(f"Processed agent action in {processing_time:.2f} seconds")
-            
+                response_text = f"❌ {result['message']}"
         else:
-            # Fall back to traditional regex-based action detection if RAG didn't detect an action
-            is_action_request, action_type, action_params = await detect_action_request(question.text)
-            
-            if is_action_request:
-                # Use the inventory agent to perform the action
-                if user_id not in inventory_agents:
-                    inventory_agents[user_id] = InventoryAgent(user_id)
-                    
-                agent = inventory_agents[user_id]
-                logger.info(f"Performing action detected via regex: {action_type} with params: {action_params}")
-                result = await perform_agent_action(agent, action_type, action_params)
-                
-                # Generate a natural language response based on the action result
-                if result["success"]:
-                    response = f"✅ {result['message']}"
-                    if 'data' in result and result['data']:
-                        response += "\n\nHere are the details:\n"
-                        response += json.dumps(result['data'], indent=2)
-                else:
-                    response = f"❌ {result['message']}"
-                
-                processing_time = time.time() - start_time
-                logger.info(f"Processed agent action in {processing_time:.2f} seconds")
-            else:
-                # It's a regular query, not an action
-                response = await rag_assistant.query(question.text)
-                
-                processing_time = time.time() - start_time
-                logger.info(f"Processed query in {processing_time:.2f} seconds")
-        
+            response_text = await rag_assistants[user_id].query(question.text)
+
+        processing_time = time.time() - start_time
         return Response(
-            response=response,
+            response=response_text,
             conversation_id=conversation_id,
             processing_time=processing_time
         )
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}")
-        
+
         # Return a graceful error response
         return Response(
             response="I encountered an issue while processing your request. Please try again.",
